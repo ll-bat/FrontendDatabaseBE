@@ -1,19 +1,32 @@
-from django.http import HttpResponse
-from django.shortcuts import render
-
-
-# Create your views here.
 from rest_framework.decorators import api_view
 from rest_framework.exceptions import ValidationError
+from rest_framework.response import Response
+
+from api.helpers import dbname, fetchone, DbHelper
 
 
+@api_view(['post'])
 def create_table(request):
-    return HttpResponse(content="implement this method")
+    name = request.data.get("name", None)
+    fields = request.data.get("fields", None)
+    if not name or not fields:
+        raise ValidationError({'non_fields_errors': {'name': 'please provide name and fields'}})
+    try:
+        DbHelper.create_table(name, fields)
+    except Exception as e:
+        raise ValidationError({'non_field_errors': {'name': "Can't create table"}})
+    return Response("implement this method")
 
 
 @api_view(['get'])
 def table_exists(request):
-    name = request.GET.get('name', False)
+    name = request.query_params.get('name', None)
     if not name:
         raise ValidationError({'non_field_errors': {'name': 'please provide table name'}})
-    return HttpResponse(content=" this method")
+    # noinspection PyBroadException
+    try:
+        # noinspection SqlDialectInspection
+        data = fetchone('select * from %s' % dbname(name))
+        return Response(True)
+    except Exception as e:
+        return Response(False)

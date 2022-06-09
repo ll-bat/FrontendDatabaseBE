@@ -26,9 +26,11 @@ DEBUG = True
 
 ALLOWED_HOSTS = ['localhost', '127.0.0.1']
 
-CORS_ALLOWED_ORIGINS = [
-    'http://localhost:63342',
-]
+CORS_ORIGIN_ALLOW_ALL = True
+# CORS_ALLOWED_ORIGINS = [
+#     'http://localhost:63342',
+#     'http://localhost:63343',
+# ]
 
 # Application definition
 
@@ -80,14 +82,20 @@ WSGI_APPLICATION = 'app.wsgi.application'
 # Database
 # https://docs.djangoproject.com/en/4.0/ref/settings/#databases
 
+MAIN_DATABASE = 'frontend_database'
+MAIN_DATABASE_USER = 'vladimer'
+MAIN_DATABASE_PASSWORD = 'vladimer'
+MAIN_DATABASE_HOST = 'localhost'
+MAIN_DATABASE_PORT = '5432'
+
 DATABASES = {
     'default': {
         'ENGINE': 'django.db.backends.postgresql',
-        'NAME': 'frontend_database',
-        'USER': 'vladimer',
-        'PASSWORD': 'vladimer',
-        'HOST': 'localhost',
-        'PORT': '5432',
+        'NAME': MAIN_DATABASE,
+        'USER': MAIN_DATABASE_USER,
+        'PASSWORD': MAIN_DATABASE_PASSWORD,
+        'HOST': MAIN_DATABASE_HOST,
+        'PORT': MAIN_DATABASE_PORT,
     }
 }
 
