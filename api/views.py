@@ -1,3 +1,5 @@
+import traceback
+
 from rest_framework.decorators import api_view
 from rest_framework.exceptions import ValidationError
 from rest_framework.response import Response
@@ -14,6 +16,17 @@ def create_table(request):
     try:
         DbHelper.create_table(name, fields)
     except Exception as e:
+        from pprint import pprint
+        print('')
+        print('PPRINT')
+        print('')
+        print('')
+        print('')
+        pprint(str(e))
+        pprint(traceback.format_exc())
+        print('')
+        print('')
+        print('')
         raise ValidationError({'non_field_errors': {'name': "Can't create table"}})
     return Response("implement this method")
 
