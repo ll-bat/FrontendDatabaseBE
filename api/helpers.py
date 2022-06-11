@@ -1,8 +1,8 @@
 import itertools
 import json
 import os
-import random
-import string
+from abc import abstractmethod
+
 import psycopg2
 from django.db import transaction
 
@@ -74,8 +74,22 @@ class UserDatabaseHelper:
         return UserDatabaseHelper.execute(sql, fetchall=True)
 
     @staticmethod
-    def add_app_if_not_exists(app):
+    def get_user_models_file(app_path=None):
+        if not app_path:
+            app_path = UserDatabaseHelper.get_user_app_path()
+        models_path = os.path.join(app_path, 'models.py')
+        return models_path
+
+    @staticmethod
+    def get_user_app_path(app=None):
+        if not app:
+            app = get_user_database()
         app_path = f'__apps__/{app}'
+        return app_path
+
+    @staticmethod
+    def add_app_if_not_exists(app):
+        app_path = UserDatabaseHelper.get_user_app_path(app)
         if not os.path.isdir(app_path):
             try:
                 """
@@ -112,15 +126,42 @@ class UserDatabaseHelper:
         received_table_data = UserDatabaseHelper.build_table_from_data({'name': name, 'fields': fields})
         existing_table_model = UserTable.objects.filter(name=name).first()
         if not existing_table_model:
-            with transaction.atomic():
-                UserTable(name=name, data=received_table_data.to_json()).save()
+            try:
+                with transaction.atomic():
+                    table_model = UserTable(name=name, data=received_table_data.to_json())
+                    table_model.save()
+                    UserDatabaseHelper.build_user_models_file()
+            except Exception as e:
+                raise e
         else:
             saved_table_data = TableData.from_json(existing_table_model.data)
-            if received_table_data == saved_table_data:
-                # ok
-                return
+            if received_table_data != saved_table_data:
+                try:
+                    with transaction.atomic():
+                        existing_table_model.data = received_table_data.to_json()
+                        existing_table_model.save()
+                        UserDatabaseHelper.build_user_models_file()
+                except Exception as e:
+                    raise e
 
-            raise Exception('Implement logic for table/model creation')
+    @staticmethod
+    def write_to_user_models_file(content, models_file=None):
+        if not models_file:
+            models_file = UserDatabaseHelper.get_user_models_file()
+        with open(models_file, 'w') as file:
+            file.write(content)
+
+    @staticmethod
+    def build_user_models_file():
+        user_table_models = UserTable.objects.all()
+        table_models = [TableData.from_json(model.data) for model in user_table_models]
+        content_list = [
+            'from django.db import models\n\n\n',
+            *[model.build_to_write() + '\n\n' for model in table_models]
+        ]
+        content = ''.join(content_list)
+        UserDatabaseHelper.write_to_user_models_file(content)
+
 
 class TableData:
     """
@@ -150,7 +191,7 @@ class TableData:
         self._orig_fields = data['fields']
         self.build_fields(data['fields'])
 
-    def get_name(self):
+    def get_name(self) -> str:
         return self.name
 
     def get_fields(self):
@@ -163,12 +204,11 @@ class TableData:
             self._fields_sorted = True
 
     def build_fields(self, fields):
-        for field in fields:
-            config = fields[field]
-            name = field
+        for name in fields:
+            config = fields[name]
             type = config['type']
             params = config['params']
-            field_class = TableField(name, type, params)
+            field_class = TableFieldFactory.create(name, type, params)
             self._fields.append(field_class)
         self._sort_fields()
 
@@ -180,8 +220,31 @@ class TableData:
 
     @staticmethod
     def from_json(json_data):
+        """
+        json_data: {
+            'name': 'table-name',
+            'fields': {
+                'id': {
+                    'type' : '',
+                    'params': {
+                        ...
+                    }
+                }
+            }
+        }
+        """
         data = json.loads(json_data)
         return TableData(data)
+
+    def build_to_write(self):
+        content_list = [
+            f"class {self.get_name().capitalize()}(models.Model):",
+            *['    ' + field.build_to_write() for field in self.get_fields()],
+            '',
+            f'    class Meta:',
+            f'        db_table = "{self.get_name()}"'
+        ]
+        return '\n'.join(content_list)
 
     def __eq__(self, other):
         if not isinstance(other, self.__class__):
@@ -203,45 +266,63 @@ class TableData:
                f"fields: {', '.join(str(field) for field in self.get_fields())}>"
 
 
-class TableField:
-    # noinspection PyShadowingBuiltins
-    def __init__(self, name, type, params):
+class AbstractTableField:
+    def __init__(self, name, params):
         self.name = name
-        self.type = type
-        self.length = None
-        self.nullable = None
-        self.default_value = None
-        self.set_config(params)
-        self.validate()
+        self._params = params
+        self._default_length = 255
+        self._default_nullable = True
+        self._default_value = ''
+        self.length = self._get_length(params)
+        self.nullable = self._get_nullable(params)
+        self.default_value = self._get_default_value(params)
 
-    def set_config(self, config):
-        self.length = config.get('length')
-        self.nullable = config.get('nullable')
-        self.default_value = config.get('default_value')
+    def _get_length(self, params):
+        length = params.get('length', None)
+        if isinstance(length, int):
+            return length
+        return self._default_length
 
-    def validate(self):
-        pass
+    def _get_nullable(self, params):
+        nullable = params.get('nullable', None)
+        if nullable is None:
+            return self._default_nullable
+        return True if nullable else False
+
+    def _get_default_value(self, params):
+        default_value = params.get('default_value', None)
+        if isinstance(default_value, str):
+            return default_value
+        return self._default_value
 
     def to_dict(self):
         return {
             'name': self.name,
-            'type': self.type,
-            'params': {
-                'length': self.length,
-                'nullable': self.nullable,
-                'default_value': self.default_value,
-            }
+            'type': self.get_type(),
+            'params': self.get_params()
         }
 
     @staticmethod
-    def from_dict(dict):
-        name = dict['name']
-        type = dict['type']
-        params = dict['params']
-        return TableField(name, type, params)
+    def from_dict(config):
+        name = config['name']
+        type = config['type']
+        params = config['params']
+        return TableFieldFactory.create(name, type, params)
+
+    @abstractmethod
+    def get_type(self) -> str:
+        raise Exception('implement in child class')
+
+    @abstractmethod
+    def get_params(self) -> dict:
+        raise Exception('implement in child class')
+
+    @abstractmethod
+    def build_to_write(self) -> str:
+        raise Exception('implement in child class')
 
     def __eq__(self, other):
-        if not isinstance(other, TableField):
+        if not isinstance(other, AbstractTableField):
             return False
 
         self_dict = self.to_dict()
@@ -250,7 +331,79 @@ class TableField:
         return json.dumps(self_dict, sort_keys=True) == json.dumps(other_dict, sort_keys=True)
 
     def __repr__(self):
-        return f'{self.type}({self.name})'
+        return f'{self.get_type()}({self.name}, ' \
+               f'({self.length}, {self.nullable}, {self._default_value}))'
+
+
+class PrimaryKeyField(AbstractTableField):
+    def __init__(self, name, params):
+        super(PrimaryKeyField, self).__init__(name, params)
+
+    def get_type(self):
+        return TABLE_FIELD_PRIMARY_KEY_FIELD
+
+    def get_params(self) -> dict:
+        return {}
+
+    def build_to_write(self) -> str:
+        return f'{self.name} = models.IntegerField(primary_key=True)'
+
+
+class CharField(AbstractTableField):
+    def __init__(self, name, params):
+        super(CharField, self).__init__(name, params)
+
+    def get_type(self):
+        return TABLE_FIELD_CHAR_FIELD
+
+    def get_params(self) -> dict:
+        return {
+            'length': self.length,
+            'nullable': self.nullable,
+            'default_value': self.default_value,
+        }
+
+    def build_to_write(self) -> str:
+
+        return f'{self.name} = models.CharField(max_length={self.length}, null={self.nullable}, ' \
+               f'blank={self.nullable}, default="{self.default_value}")'
+
+
+class BooleanField(AbstractTableField):
+    def __init__(self, name, params):
+        super(BooleanField, self).__init__(name, params)
+
+    def get_type(self):
+        return TABLE_FIELD_CHAR_FIELD
+
+    def get_params(self) -> dict:
+        return {
+            'length': self.length,
+            'nullable': self.nullable,
+            'default_value': self.nullable,
+        }
+
+    def build_to_write(self) -> str:
+        return f'{self.name} = models.BooleanField(null={self.nullable}, blank={self.nullable}, ' \
+               f'default="{self.default_value}")'
+
+
+TABLE_FIELD_PRIMARY_KEY_FIELD = 'PrimaryKeyField'
+TABLE_FIELD_CHAR_FIELD = 'CharField'
+TABLE_FIELD_BOOLEAN_FIELD = 'BooleanField'
+
+
+class TableFieldFactory:
+    @staticmethod
+    def create(name, type, params):
+        if type == TABLE_FIELD_PRIMARY_KEY_FIELD:
+            return PrimaryKeyField(name, params)
+        elif type == TABLE_FIELD_CHAR_FIELD:
+            return CharField(name, params)
+        elif type == TABLE_FIELD_BOOLEAN_FIELD:
+            return BooleanField(name, params)
+        else:
+            raise Exception('not such field ' + type)
 
 
 DbHelper = UserDatabaseHelper
