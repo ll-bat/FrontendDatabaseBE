@@ -2,12 +2,17 @@ import itertools
 import json
 import os
 from abc import abstractmethod
+from collections import OrderedDict
 
 import psycopg2
+from django.apps import apps
+from django.core import management
+from django.core.management import call_command
 from django.db import transaction
 
 from api.middleware import get_user_database
 from api.models import UserTable
+from app import settings
 from app.settings import MAIN_DATABASE, MAIN_DATABASE_USER, MAIN_DATABASE_PASSWORD, MAIN_DATABASE_HOST, \
     MAIN_DATABASE_PORT
 
@@ -81,11 +86,36 @@ class UserDatabaseHelper:
         return models_path
 
     @staticmethod
+    def get_app_path():
+        return '__apps__'
+
+    @staticmethod
     def get_user_app_path(app=None):
         if not app:
             app = get_user_database()
-        app_path = f'__apps__/{app}'
+        global_app_path = UserDatabaseHelper.get_app_path()
+        app_path = f'{global_app_path}/{app}'
         return app_path
+
+    @staticmethod
+    def makemigrations(app):
+        call_command('makemigrations', app)
+
+    @staticmethod
+    def migrate(app, database):
+        call_command('migrate', app, database=database)
+
+    @staticmethod
+    def get_app_modules():
+        app_path = UserDatabaseHelper.get_app_path()
+        modules = os.listdir(app_path)
+        return map(lambda module: '.'.join([app_path, module]), modules)
+
+    @staticmethod
+    def get_app_databases():
+        app_path = UserDatabaseHelper.get_app_path()
+        databases = os.listdir(app_path)
+        return databases
 
     @staticmethod
     def add_app_if_not_exists(app):
@@ -120,6 +150,13 @@ class UserDatabaseHelper:
         return TableData(data)
 
     @staticmethod
+    def read_file(path):
+        content = ''
+        with open(path, 'r') as file:
+            content = file.read()
+        return content
+
+    @staticmethod
     def create_table(name, fields):
         db = get_user_database()
         UserDatabaseHelper.add_app_if_not_exists(db)
@@ -130,7 +167,9 @@ class UserDatabaseHelper:
                 with transaction.atomic():
                     table_model = UserTable(name=name, data=received_table_data.to_json())
                     table_model.save()
-                    UserDatabaseHelper.build_user_models_file()
+                    UserDatabaseHelper.build_and_write_user_models_file()
+                    UserDatabaseHelper.makemigrations(db)
+                    UserDatabaseHelper.migrate(db, db)
             except Exception as e:
                 raise e
         else:
@@ -140,9 +179,14 @@ class UserDatabaseHelper:
                     with transaction.atomic():
                         existing_table_model.data = received_table_data.to_json()
                         existing_table_model.save()
-                        UserDatabaseHelper.build_user_models_file()
+                        UserDatabaseHelper.build_and_write_user_models_file()
+                        UserDatabaseHelper.makemigrations(db)
+                        UserDatabaseHelper.migrate(db, db)
                 except Exception as e:
                     raise e
+
+            UserDatabaseHelper.makemigrations(db)
+            UserDatabaseHelper.migrate(db, db)
 
     @staticmethod
     def write_to_user_models_file(content, models_file=None):
@@ -152,7 +196,7 @@ class UserDatabaseHelper:
             file.write(content)
 
     @staticmethod
-    def build_user_models_file():
+    def build_and_write_user_models_file():
         user_table_models = UserTable.objects.all()
         table_models = [TableData.from_json(model.data) for model in user_table_models]
         content_list = [
@@ -364,7 +408,6 @@ class CharField(AbstractTableField):
         }
 
     def build_to_write(self) -> str:
-
         return f'{self.name} = models.CharField(max_length={self.length}, null={self.nullable}, ' \
                f'blank={self.nullable}, default="{self.default_value}")'
 
@@ -419,3 +462,44 @@ def fetchone(sql):
 
 def fetchall(sql):
     return DbHelper.fetchall(sql)
+
+
+class SettingsHelper:
+    _is_inited = False
+
+    @classmethod
+    def init(cls):
+        if cls._is_inited:
+            return
+        cls._is_inited = True
+        cls.load_dynamic_modules()
+        cls.load_dynamic_connections()
+        cls.restart_server()
+
+    @classmethod
+    def restart_server(cls):
+        apps.app_configs = OrderedDict()
+        apps.apps_ready = apps.models_ready = apps.loading = apps.ready = False
+        apps.clear_cache()
+        apps.populate(settings.INSTALLED_APPS)
+        # management.call_command('migrate', new_app_name, interactive=False)
+
+    @classmethod
+    def load_dynamic_modules(cls):
+        settings.INSTALLED_APPS += (module for module in UserDatabaseHelper.get_app_modules())
+
+    @classmethod
+    def load_dynamic_connections(cls):
+        databases = settings.DATABASES
+        for dynamic_db in UserDatabaseHelper.get_app_databases():
+            databases.update({
+                dynamic_db: {
+                    'ENGINE': 'django.db.backends.postgresql',
+                    'NAME': dynamic_db,
+                    'USER': MAIN_DATABASE_USER,
+                    'PASSWORD': MAIN_DATABASE_PASSWORD,
+                    'HOST': MAIN_DATABASE_HOST,
+                    'PORT': MAIN_DATABASE_PORT,
+                }
+            })
+        settings.DATABASES = databases
