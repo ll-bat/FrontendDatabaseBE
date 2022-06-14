@@ -1,6 +1,7 @@
 import itertools
 import json
 import os
+import subprocess
 from abc import abstractmethod
 from collections import OrderedDict
 
@@ -10,7 +11,7 @@ from django.core import management
 from django.core.management import call_command
 from django.db import transaction
 
-from api.middleware import get_user_database
+from api.middleware import get_user_database, get_user_token
 from api.models import UserTable
 from app import settings
 from app.settings import MAIN_DATABASE, MAIN_DATABASE_USER, MAIN_DATABASE_PASSWORD, MAIN_DATABASE_HOST, \
@@ -157,6 +158,12 @@ class UserDatabaseHelper:
         return content
 
     @staticmethod
+    def create_and_run_migrations():
+        db = get_user_database()
+        command_one = subprocess.Popen(['python', 'manage.py', 'makemigrations', db])
+        command_two = subprocess.Popen(['python', 'manage.py', 'migrate', db, f'--database={db}'])
+
+    @staticmethod
     def create_table(name, fields):
         db = get_user_database()
         UserDatabaseHelper.add_app_if_not_exists(db)
@@ -168,8 +175,7 @@ class UserDatabaseHelper:
                     table_model = UserTable(name=name, data=received_table_data.to_json())
                     table_model.save()
                     UserDatabaseHelper.build_and_write_user_models_file()
-                    UserDatabaseHelper.makemigrations(db)
-                    UserDatabaseHelper.migrate(db, db)
+                    UserDatabaseHelper.create_and_run_migrations()
             except Exception as e:
                 raise e
         else:
@@ -180,13 +186,9 @@ class UserDatabaseHelper:
                         existing_table_model.data = received_table_data.to_json()
                         existing_table_model.save()
                         UserDatabaseHelper.build_and_write_user_models_file()
-                        UserDatabaseHelper.makemigrations(db)
-                        UserDatabaseHelper.migrate(db, db)
+                        UserDatabaseHelper.create_and_run_migrations()
                 except Exception as e:
                     raise e
-
-            UserDatabaseHelper.makemigrations(db)
-            UserDatabaseHelper.migrate(db, db)
 
     @staticmethod
     def write_to_user_models_file(content, models_file=None):

@@ -39,7 +39,7 @@ def table_exists(request):
     # noinspection PyBroadException
     try:
         # noinspection SqlDialectInspection
-        data = fetchone('select * from %s' % dbname(name))
+        data = fetchone('select * from %s' % name)
         return Response(True)
     except Exception as e:
         return Response(False)
